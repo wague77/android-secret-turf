@@ -67,14 +67,6 @@ const getTodayDate = (): string => {
   return `${dd}${mm}${yyyy}`;
 };
 
-const formatDateForDisplay = (dateStr: string): string => {
-  if (!dateStr) return "Aujourd'hui";
-  const day = dateStr.substring(0, 2);
-  const month = dateStr.substring(2, 4);
-  const year = dateStr.substring(4, 8);
-  return `${day}/${month}/${year}`;
-};
-
 const formatTime = (timeStr: string | null | undefined): string => {
   const str = String(timeStr ?? "");
   if (str.length >= 5) {
@@ -116,21 +108,28 @@ export default function PartantsPMU() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [hasMounted, setHasMounted] = useState(false);
 
   const fetchWithNova = async (url: string): Promise<any> => {
     try {
+      console.log("[PMU] Fetching:", url);
       const response = await window.nova.fetch(url, {
         method: 'GET',
         headers: {
           'Accept': 'application/json',
         },
       });
+      console.log("[PMU] Status:", response.status);
       if (!response.ok) {
-        throw new Error(`Erreur HTTP ${response.status}`);
+        const text = await response.text().catch(() => "No body");
+        console.error("[PMU] Error body:", text);
+        throw new Error(`Erreur HTTP ${response.status}: ${text}`);
       }
-      return await response.json();
+      const data = await response.json();
+      console.log("[PMU] Data received:", Object.keys(data));
+      return data;
     } catch (err) {
-      console.error("Fetch error:", err);
+      console.error("[PMU] Fetch error:", err);
       throw err;
     }
   };
@@ -145,19 +144,23 @@ export default function PartantsPMU() {
 
     try {
       const url = `${BASE_URL}/${selectedDate}`;
+      console.log("[PMU] Loading programme for", selectedDate);
       const data = await fetchWithNova(url);
 
-      if (data?.programme?.reunions && Array.isArray(data.programme.reunions)) {
+      if (data?.programme?.reunions && Array.isArray(data.programme.reunions) && data.programme.reunions.length > 0) {
+        console.log("[PMU] Reunions loaded:", data.programme.reunions.length);
         setReunions(data.programme.reunions);
-        if (data.programme.reunions.length > 0) {
-          setSelectedReunion(data.programme.reunions[0].numOfficiel);
-        }
+        setSelectedReunion(data.programme.reunions[0].numOfficiel);
+        setError(null);
       } else {
-        setError("Aucune réunion trouvée pour cette date.");
+        console.warn("[PMU] No reunions in response");
+        setError("Aucune réunion disponible pour cette date. Essayez une autre date ou réessayez plus tard.");
+        setReunions([]);
       }
     } catch (err: any) {
-      setError("Impossible de charger le programme. Vérifiez votre connexion ou réessayez plus tard.");
-      console.error(err);
+      console.error("[PMU] Load error:", err.message);
+      setError(`Impossible de charger le programme : ${err.message}. Vérifiez votre connexion internet et que l'application a les permissions réseau.`);
+      setReunions([]);
     } finally {
       setLoading(false);
     }
@@ -170,6 +173,7 @@ export default function PartantsPMU() {
 
     try {
       const base = `${BASE_URL}/${date}`;
+      console.log(`[PMU] Loading details for R${reunionNum} C${courseNum}`);
 
       // Participants
       const partUrl = `${base}/R${reunionNum}/C${courseNum}/participants`;
@@ -185,7 +189,7 @@ export default function PartantsPMU() {
           pronostics = pronData.selection;
         }
       } catch (e) {
-        console.warn("Pas de pronostics disponibles");
+        console.warn("[PMU] No pronostics");
       }
 
       // Commentaire
@@ -197,44 +201,54 @@ export default function PartantsPMU() {
           commentaire = commData.commentaire;
         }
       } catch (e) {
-        console.warn("Pas de commentaire détaillé");
+        console.warn("[PMU] No detailed comment");
       }
 
+      const sortedParticipants = [...participants].sort((a: Participant, b: Participant) => a.numPmu - b.numPmu);
+      const sortedPronostics = [...pronostics].sort((a, b) => a.rang - b.rang);
+
       setCourseDetail({
-        participants: participants.sort((a: Participant, b: Participant) => a.numPmu - b.numPmu),
-        pronostics: pronostics.sort((a, b) => a.rang - b.rang),
+        participants: sortedParticipants,
+        pronostics: sortedPronostics.length > 0 ? sortedPronostics : undefined,
         commentaire,
       });
+      setError(null);
     } catch (err: any) {
-      setError("Impossible de charger les détails de la course.");
-      console.error(err);
+      console.error("[PMU] Course detail error:", err);
+      setError(`Impossible de charger les détails : ${err.message}`);
     } finally {
       setLoading(false);
     }
   }, [date]);
 
-  // Load initial data
+  // Initial load + Android WebView readiness
   useEffect(() => {
-    loadProgramme(date);
+    const timer = setTimeout(() => {
+      setHasMounted(true);
+      console.log("[PMU] App mounted - loading programme");
+      loadProgramme(date);
+    }, 800); // Give time for WebView / nova to be ready on Android
+
+    return () => clearTimeout(timer);
   }, [loadProgramme, date]);
 
   // Auto load course when selections change
   useEffect(() => {
-    if (selectedReunion !== null && selectedCourseNum !== null) {
+    if (selectedReunion !== null && selectedCourseNum !== null && hasMounted) {
       const reunion = reunions.find(r => r.numOfficiel === selectedReunion);
-      if (reunion) {
-        const courseExists = reunion.courses.some(c => c.numOrdre === selectedCourseNum);
-        if (courseExists) {
-          loadCourseDetails(selectedReunion, selectedCourseNum);
-        }
+      if (reunion && reunion.courses.some(c => c.numOrdre === selectedCourseNum)) {
+        loadCourseDetails(selectedReunion, selectedCourseNum);
       }
     }
-  }, [selectedReunion, selectedCourseNum, reunions, loadCourseDetails]);
+  }, [selectedReunion, selectedCourseNum, reunions, loadCourseDetails, hasMounted]);
 
   const handleDateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const newDate = e.target.value.replace(/-/g, '');
-    if (newDate.length === 8) {
-      setDate(newDate);
+    const inputDate = e.target.value;
+    if (inputDate) {
+      const newDate = inputDate.replace(/-/g, '');
+      if (newDate.length === 8) {
+        setDate(newDate);
+      }
     }
   };
 
@@ -275,7 +289,6 @@ export default function PartantsPMU() {
     if (jeu.includes('Trio') || jeu.includes('Tiercé')) {
       return nums.slice(0, 3).join(' - ');
     }
-    // Super4, Quarté, Multi, Quinté, Pick5
     return nums.slice(0, 4).join(' - ');
   };
 
@@ -295,7 +308,6 @@ export default function PartantsPMU() {
           </div>
 
           <div className="flex items-center gap-4">
-            {/* Date selector */}
             <div className="flex items-center bg-[#132913] border border-[#D4AF37]/30 rounded-xl px-4 py-2 text-sm">
               <Calendar className="w-4 h-4 mr-2 text-[#D4AF37]" />
               <input
@@ -308,16 +320,15 @@ export default function PartantsPMU() {
 
             <button
               onClick={refreshData}
-              disabled={refreshing}
+              disabled={refreshing || loading}
               className="flex items-center gap-2 bg-[#D4AF37] hover:bg-[#E8C55A] text-[#0A1F0A] font-semibold px-5 py-2.5 rounded-2xl transition-all active:scale-95 disabled:opacity-70 shadow-md"
             >
-              <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+              <RefreshCw className={`w-4 h-4 ${refreshing || loading ? 'animate-spin' : ''}`} />
               <span className="text-sm">ACTUALISER</span>
             </button>
           </div>
         </div>
 
-        {/* Reunion tabs */}
         {reunions.length > 0 && (
           <div className="max-w-5xl mx-auto px-6 pb-3 overflow-x-auto hide-scrollbar">
             <div className="flex gap-2 py-1">
@@ -356,17 +367,18 @@ export default function PartantsPMU() {
               )}
             </div>
 
-            {loading && !reunions.length && (
+            {loading && reunions.length === 0 && (
               <div className="py-12 flex flex-col items-center text-[#D4AF37]/60">
                 <div className="animate-spin w-8 h-8 border-2 border-[#D4AF37] border-t-transparent rounded-full mb-4"></div>
-                <p>Chargement du programme...</p>
+                <p>Chargement du programme PMU...</p>
+                <p className="text-xs mt-3 text-[#D4AF37]/40">Attendez que la connexion soit établie</p>
               </div>
             )}
 
             {error && reunions.length === 0 && (
               <div className="bg-red-950/40 border border-red-500/30 rounded-2xl p-6 text-center">
                 <AlertTriangle className="w-8 h-8 mx-auto text-red-400 mb-3" />
-                <p className="text-red-200 text-sm">{error}</p>
+                <p className="text-red-200 text-sm leading-relaxed">{error}</p>
                 <button
                   onClick={() => loadProgramme(date)}
                   className="mt-6 text-xs bg-red-900 hover:bg-red-800 px-6 py-2 rounded-xl text-red-100"
@@ -428,7 +440,19 @@ export default function PartantsPMU() {
 
         {/* Main content area */}
         <div className="flex-1">
-          {!selectedCourse && !loading && !error && (
+          {!selectedCourse && !loading && !error && reunions.length === 0 && (
+            <div className="h-96 flex flex-col items-center justify-center border border-dashed border-[#D4AF37]/30 rounded-3xl bg-[#132913]/50">
+              <div className="w-16 h-16 bg-[#1E3A1E] rounded-3xl flex items-center justify-center mb-6">
+                <Trophy className="w-8 h-8 text-[#D4AF37]" />
+              </div>
+              <p className="text-xl text-[#D4AF37]/70 font-light">Programme en cours de chargement</p>
+              <p className="text-sm max-w-xs text-center mt-3 text-[#D4AF37]/40">
+                L'application attend que l'environnement Android soit prêt. Appuyez sur Actualiser si rien ne s'affiche après 10 secondes.
+              </p>
+            </div>
+          )}
+
+          {!selectedCourse && !loading && !error && reunions.length > 0 && (
             <div className="h-96 flex flex-col items-center justify-center border border-dashed border-[#D4AF37]/30 rounded-3xl">
               <div className="w-16 h-16 bg-[#1E3A1E] rounded-3xl flex items-center justify-center mb-6">
                 <Trophy className="w-8 h-8 text-[#D4AF37]" />
@@ -490,7 +514,6 @@ export default function PartantsPMU() {
                 </div>
 
                 <div className="bg-[#132913] border border-[#D4AF37]/30 rounded-3xl p-8">
-                  {/* Sélection classée */}
                   <div className="mb-8">
                     <div className="uppercase text-xs font-bold tracking-widest text-[#D4AF37]/70 mb-4">SÉLECTION CLASSÉE</div>
                     
@@ -516,7 +539,6 @@ export default function PartantsPMU() {
                     </div>
                   </div>
 
-                  {/* Commentaire */}
                   {courseDetail.commentaire && courseDetail.commentaire.texte && (
                     <div className="mb-8 border-t border-[#D4AF37]/20 pt-8">
                       <div className="uppercase text-xs font-bold tracking-widest text-[#D4AF37]/70 mb-3">COMMENTAIRE DE L'EXPERT</div>
@@ -526,7 +548,6 @@ export default function PartantsPMU() {
                     </div>
                   )}
 
-                  {/* Combinaisons par jeu */}
                   <div>
                     <div className="uppercase text-xs font-bold tracking-widest text-[#D4AF37]/70 mb-5">COMBINAISONS RECOMMANDÉES</div>
                     
@@ -556,7 +577,7 @@ export default function PartantsPMU() {
 
                 <div className="space-y-4">
                   {courseDetail.participants.map((partant) => {
-                    const isNonPartant = partant.statut && partant.statut.toLowerCase() !== 'partant';
+                    const isNonPartant = partant.statut && !partant.statut.toLowerCase().includes('partant');
                     const cote = partant.dernierRapportDirect?.rapport;
                     
                     return (
@@ -568,7 +589,6 @@ export default function PartantsPMU() {
                             : 'bg-[#132913] border-[#D4AF37]/30 hover:border-[#D4AF37]'
                         }`}
                       >
-                        {/* Numéro */}
                         <div className={`w-14 h-14 flex-shrink-0 rounded-2xl flex items-center justify-center text-4xl font-bold shadow-inner ${
                           isNonPartant 
                             ? 'bg-[#3A2F1F] text-[#9C8B5E]' 
@@ -630,8 +650,10 @@ export default function PartantsPMU() {
             <div className="bg-red-900/20 border border-red-500/40 rounded-3xl p-10 text-center">
               <AlertTriangle className="mx-auto mb-4 text-red-400" />
               <p className="text-red-200">{error}</p>
-              <button onClick={() => selectedReunion && selectedCourseNum && loadCourseDetails(selectedReunion, selectedCourseNum)} 
-                className="mt-6 px-8 py-3 bg-red-800 hover:bg-red-700 text-sm rounded-2xl">
+              <button 
+                onClick={() => selectedReunion && selectedCourseNum && loadCourseDetails(selectedReunion, selectedCourseNum)} 
+                className="mt-6 px-8 py-3 bg-red-800 hover:bg-red-700 text-sm rounded-2xl"
+              >
                 RÉESSAYER
               </button>
             </div>
