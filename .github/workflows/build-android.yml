@@ -56,6 +56,12 @@ jobs:
           ls android/app/src/main/assets/public/assets | head
           echo "Taille des assets Android :"; du -sh android/app/src/main/assets/public
 
+      - name: Keep the same signing key between builds (avoids "package conflict" on update)
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: android-debug-keystore-v1
+
       - name: Signing keystore
         run: |
           keytool -genkeypair -v -keystore android/app/release.keystore -alias release-key \
