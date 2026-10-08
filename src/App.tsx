@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { Calendar, RefreshCw, Trophy, Users, Clock, MapPin, Award, AlertTriangle, Info } from "lucide-react";
+import { Calendar, RefreshCw, Trophy, Users, Clock, MapPin, Award, AlertTriangle, Info, WifiOff } from "lucide-react";
 
 declare global {
   interface Window {
-    nova: {
+    nova?: {
       fetch: typeof fetch;
     };
   }
@@ -108,9 +108,13 @@ export default function PartantsPMU() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
-  const [hasMounted, setHasMounted] = useState(false);
+  const [novaReady, setNovaReady] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
 
   const fetchWithNova = async (url: string): Promise<any> => {
+    if (!window.nova?.fetch) {
+      throw new Error("window.nova.fetch n'est pas disponible. L'application attend l'environnement Android.");
+    }
     try {
       console.log("[PMU] Fetching:", url);
       const response = await window.nova.fetch(url, {
@@ -123,18 +127,18 @@ export default function PartantsPMU() {
       if (!response.ok) {
         const text = await response.text().catch(() => "No body");
         console.error("[PMU] Error body:", text);
-        throw new Error(`Erreur HTTP ${response.status}: ${text}`);
+        throw new Error(`Erreur HTTP ${response.status}`);
       }
       const data = await response.json();
-      console.log("[PMU] Data received:", Object.keys(data));
+      console.log("[PMU] Data keys:", Object.keys(data));
       return data;
-    } catch (err) {
-      console.error("[PMU] Fetch error:", err);
+    } catch (err: any) {
+      console.error("[PMU] Fetch error:", err.message || err);
       throw err;
     }
   };
 
-  const loadProgramme = useCallback(async (selectedDate: string) => {
+  const loadProgramme = useCallback(async (selectedDate: string, isRetry = false) => {
     setLoading(true);
     setError(null);
     setSelectedReunion(null);
@@ -142,69 +146,69 @@ export default function PartantsPMU() {
     setCourseDetail(null);
     setReunions([]);
 
+    if (!novaReady && !window.nova?.fetch) {
+      setError("L'environnement Android (window.nova) n'est pas encore prêt. Appuyez sur Actualiser dans quelques secondes.");
+      setLoading(false);
+      return;
+    }
+
     try {
       const url = `${BASE_URL}/${selectedDate}`;
-      console.log("[PMU] Loading programme for", selectedDate);
+      console.log("[PMU] Loading programme for", selectedDate, `(retry ${retryCount})`);
       const data = await fetchWithNova(url);
 
       if (data?.programme?.reunions && Array.isArray(data.programme.reunions) && data.programme.reunions.length > 0) {
-        console.log("[PMU] Reunions loaded:", data.programme.reunions.length);
+        console.log("[PMU] Success -", data.programme.reunions.length, "réunions chargées");
         setReunions(data.programme.reunions);
         setSelectedReunion(data.programme.reunions[0].numOfficiel);
         setError(null);
+        setRetryCount(0);
       } else {
-        console.warn("[PMU] No reunions in response");
-        setError("Aucune réunion disponible pour cette date. Essayez une autre date ou réessayez plus tard.");
+        console.warn("[PMU] No reunions found");
+        setError("Aucune réunion disponible pour cette date. Essayez une autre date (ex. hier ou demain) ou réessayez plus tard.");
         setReunions([]);
       }
     } catch (err: any) {
       console.error("[PMU] Load error:", err.message);
-      setError(`Impossible de charger le programme : ${err.message}. Vérifiez votre connexion internet et que l'application a les permissions réseau.`);
+      const msg = err.message.includes("nova.fetch") 
+        ? "window.nova.fetch n'est pas disponible. Vérifiez que l'application est bien lancée via NOVA Studio sur Android."
+        : `Impossible de charger le programme : ${err.message}`;
+      setError(msg);
       setReunions([]);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [novaReady, retryCount]);
 
   const loadCourseDetails = useCallback(async (reunionNum: number, courseNum: number) => {
+    if (!novaReady) return;
     setLoading(true);
     setError(null);
     setCourseDetail(null);
 
     try {
       const base = `${BASE_URL}/${date}`;
-      console.log(`[PMU] Loading details for R${reunionNum} C${courseNum}`);
+      console.log(`[PMU] Loading details R${reunionNum} C${courseNum}`);
 
-      // Participants
       const partUrl = `${base}/R${reunionNum}/C${courseNum}/participants`;
       const partData = await fetchWithNova(partUrl);
       const participants = Array.isArray(partData?.participants) ? partData.participants : [];
 
-      // Pronostics
       let pronostics: Pronostic[] = [];
       try {
         const pronUrl = `${base}/R${reunionNum}/C${courseNum}/pronostics`;
         const pronData = await fetchWithNova(pronUrl);
-        if (Array.isArray(pronData?.selection)) {
-          pronostics = pronData.selection;
-        }
-      } catch (e) {
-        console.warn("[PMU] No pronostics");
-      }
+        if (Array.isArray(pronData?.selection)) pronostics = pronData.selection;
+      } catch (e) { console.warn("[PMU] No pronostics"); }
 
-      // Commentaire
       let commentaire: Commentaire | undefined;
       try {
         const commUrl = `${base}/R${reunionNum}/C${courseNum}/pronostics-detailles`;
         const commData = await fetchWithNova(commUrl);
-        if (commData?.commentaire?.texte) {
-          commentaire = commData.commentaire;
-        }
-      } catch (e) {
-        console.warn("[PMU] No detailed comment");
-      }
+        if (commData?.commentaire?.texte) commentaire = commData.commentaire;
+      } catch (e) { console.warn("[PMU] No comment"); }
 
-      const sortedParticipants = [...participants].sort((a: Participant, b: Participant) => a.numPmu - b.numPmu);
+      const sortedParticipants = [...participants].sort((a, b) => a.numPmu - b.numPmu);
       const sortedPronostics = [...pronostics].sort((a, b) => a.rang - b.rang);
 
       setCourseDetail({
@@ -214,33 +218,70 @@ export default function PartantsPMU() {
       });
       setError(null);
     } catch (err: any) {
-      console.error("[PMU] Course detail error:", err);
+      console.error(err);
       setError(`Impossible de charger les détails : ${err.message}`);
     } finally {
       setLoading(false);
     }
-  }, [date]);
+  }, [date, novaReady]);
 
-  // Initial load + Android WebView readiness
+  // Check for nova readiness
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setHasMounted(true);
-      console.log("[PMU] App mounted - loading programme");
+    const checkNova = () => {
+      if (window.nova?.fetch) {
+        console.log("[PMU] window.nova.fetch is now available!");
+        setNovaReady(true);
+        return true;
+      }
+      return false;
+    };
+
+    // Immediate check
+    if (checkNova()) {
       loadProgramme(date);
-    }, 800); // Give time for WebView / nova to be ready on Android
+      return;
+    }
 
-    return () => clearTimeout(timer);
-  }, [loadProgramme, date]);
+    // Poll every 500ms (max 15 seconds)
+    const interval = setInterval(() => {
+      if (checkNova()) {
+        clearInterval(interval);
+        loadProgramme(date);
+      }
+    }, 500);
 
-  // Auto load course when selections change
+    // Timeout after 12 seconds
+    const timeout = setTimeout(() => {
+      clearInterval(interval);
+      if (!window.nova?.fetch) {
+        console.error("[PMU] window.nova never became available");
+        setError("Impossible de communiquer avec l'environnement Android (window.nova.fetch manquant). L'application doit être lancée depuis NOVA Studio.");
+        setNovaReady(false);
+      }
+    }, 12000);
+
+    return () => {
+      clearInterval(interval);
+      clearTimeout(timeout);
+    };
+  }, []);
+
+  // Auto load when nova becomes ready
   useEffect(() => {
-    if (selectedReunion !== null && selectedCourseNum !== null && hasMounted) {
+    if (novaReady && reunions.length === 0 && !loading && !error) {
+      loadProgramme(date);
+    }
+  }, [novaReady, loadProgramme, date, reunions.length, loading, error]);
+
+  // Auto load course details
+  useEffect(() => {
+    if (selectedReunion !== null && selectedCourseNum !== null && novaReady) {
       const reunion = reunions.find(r => r.numOfficiel === selectedReunion);
       if (reunion && reunion.courses.some(c => c.numOrdre === selectedCourseNum)) {
         loadCourseDetails(selectedReunion, selectedCourseNum);
       }
     }
-  }, [selectedReunion, selectedCourseNum, reunions, loadCourseDetails, hasMounted]);
+  }, [selectedReunion, selectedCourseNum, reunions, loadCourseDetails, novaReady]);
 
   const handleDateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const inputDate = e.target.value;
@@ -253,8 +294,9 @@ export default function PartantsPMU() {
   };
 
   const refreshData = async () => {
+    setRetryCount(c => c + 1);
     setRefreshing(true);
-    await loadProgramme(date);
+    await loadProgramme(date, true);
     setRefreshing(false);
   };
 
@@ -264,7 +306,7 @@ export default function PartantsPMU() {
   const jeuxProposes = selectedCourse ? getJeuxForCourse(selectedCourse.paris) : [];
 
   const getPronosticChevaux = () => {
-    if (!courseDetail?.pronostics || !courseDetail.participants) return [];
+    if (!courseDetail?.pronostics || !Array.isArray(courseDetail.participants)) return [];
     return courseDetail.pronostics.map(p => {
       const part = courseDetail.participants.find(pa => pa.numPmu === p.num_partant);
       return {
@@ -277,9 +319,8 @@ export default function PartantsPMU() {
   const pronosticChevaux = getPronosticChevaux();
 
   const getCombinaisonForJeu = (jeu: string, pronos: typeof pronosticChevaux) => {
-    if (pronos.length === 0) return "–";
+    if (!Array.isArray(pronos) || pronos.length === 0) return "–";
     const nums = pronos.map(p => p.num_partant);
-    
     if (jeu.includes('Simple') || jeu.includes('Gagnant') || jeu.includes('Placé')) {
       return nums[0] ? `${nums[0]}` : "–";
     }
@@ -303,7 +344,10 @@ export default function PartantsPMU() {
             </div>
             <div>
               <h1 className="text-3xl font-bold tracking-tighter text-white">PARTANTS PMU</h1>
-              <p className="text-xs text-[#D4AF37]/70 -mt-1">Turf • Pronos • Live</p>
+              <p className="text-xs text-[#D4AF37]/70 -mt-1 flex items-center gap-1.5">
+                Turf • Pronos • Live 
+                {novaReady && <span className="text-emerald-400 text-[10px] font-mono">● CONNECTÉ</span>}
+              </p>
             </div>
           </div>
 
@@ -323,7 +367,7 @@ export default function PartantsPMU() {
               disabled={refreshing || loading}
               className="flex items-center gap-2 bg-[#D4AF37] hover:bg-[#E8C55A] text-[#0A1F0A] font-semibold px-5 py-2.5 rounded-2xl transition-all active:scale-95 disabled:opacity-70 shadow-md"
             >
-              <RefreshCw className={`w-4 h-4 ${refreshing || loading ? 'animate-spin' : ''}`} />
+              <RefreshCw className={`w-4 h-4 ${(refreshing || loading) ? 'animate-spin' : ''}`} />
               <span className="text-sm">ACTUALISER</span>
             </button>
           </div>
@@ -337,7 +381,7 @@ export default function PartantsPMU() {
                   key={reunion.numOfficiel}
                   onClick={() => {
                     setSelectedReunion(reunion.numOfficiel);
-                    setSelectedCourseNum(reunion.courses[0]?.numOrdre || null);
+                    setSelectedCourseNum(reunion.courses?.[0]?.numOrdre || null);
                   }}
                   className={`flex-shrink-0 px-5 py-2.5 rounded-2xl text-sm font-medium transition-all whitespace-nowrap flex items-center gap-2 ${
                     selectedReunion === reunion.numOfficiel
@@ -355,7 +399,7 @@ export default function PartantsPMU() {
       </header>
 
       <div className="max-w-5xl mx-auto px-6 py-6 flex gap-6">
-        {/* Sidebar - Courses list */}
+        {/* Sidebar */}
         <div className="w-80 flex-shrink-0">
           <div className="bg-[#132913] border border-[#D4AF37]/20 rounded-3xl p-5 sticky top-28">
             <div className="flex items-center justify-between mb-5">
@@ -370,21 +414,32 @@ export default function PartantsPMU() {
             {loading && reunions.length === 0 && (
               <div className="py-12 flex flex-col items-center text-[#D4AF37]/60">
                 <div className="animate-spin w-8 h-8 border-2 border-[#D4AF37] border-t-transparent rounded-full mb-4"></div>
-                <p>Chargement du programme PMU...</p>
-                <p className="text-xs mt-3 text-[#D4AF37]/40">Attendez que la connexion soit établie</p>
+                <p>Connexion à l'API PMU...</p>
+                <p className="text-xs mt-4 opacity-60">Initialisation de window.nova • {novaReady ? "Prêt" : "En attente"}</p>
               </div>
             )}
 
             {error && reunions.length === 0 && (
               <div className="bg-red-950/40 border border-red-500/30 rounded-2xl p-6 text-center">
-                <AlertTriangle className="w-8 h-8 mx-auto text-red-400 mb-3" />
-                <p className="text-red-200 text-sm leading-relaxed">{error}</p>
+                <div className="mx-auto mb-4 flex justify-center">
+                  {error.includes("nova.fetch") || error.includes("window.nova") ? (
+                    <WifiOff className="w-10 h-10 text-red-400" />
+                  ) : (
+                    <AlertTriangle className="w-10 h-10 text-red-400" />
+                  )}
+                </div>
+                <p className="text-red-200 text-sm leading-relaxed whitespace-pre-line">{error}</p>
+                
                 <button
-                  onClick={() => loadProgramme(date)}
-                  className="mt-6 text-xs bg-red-900 hover:bg-red-800 px-6 py-2 rounded-xl text-red-100"
+                  onClick={refreshData}
+                  className="mt-6 w-full py-3 text-sm font-medium bg-[#D4AF37] hover:bg-amber-300 active:bg-amber-400 text-[#0A1F0A] rounded-2xl transition-colors"
                 >
-                  RÉESSAYER
+                  RÉESSAYER MAINTENANT
                 </button>
+                
+                <div className="mt-6 text-[10px] text-red-400/70">
+                  Si le problème persiste, assurez-vous que l'application est bien installée via l'atelier NOVA Studio sur Android.
+                </div>
               </div>
             )}
 
@@ -438,17 +493,21 @@ export default function PartantsPMU() {
           </div>
         </div>
 
-        {/* Main content area */}
+        {/* Main content */}
         <div className="flex-1">
           {!selectedCourse && !loading && !error && reunions.length === 0 && (
-            <div className="h-96 flex flex-col items-center justify-center border border-dashed border-[#D4AF37]/30 rounded-3xl bg-[#132913]/50">
+            <div className="h-[520px] flex flex-col items-center justify-center border border-dashed border-[#D4AF37]/30 rounded-3xl bg-[#132913]/30">
               <div className="w-16 h-16 bg-[#1E3A1E] rounded-3xl flex items-center justify-center mb-6">
                 <Trophy className="w-8 h-8 text-[#D4AF37]" />
               </div>
-              <p className="text-xl text-[#D4AF37]/70 font-light">Programme en cours de chargement</p>
-              <p className="text-sm max-w-xs text-center mt-3 text-[#D4AF37]/40">
-                L'application attend que l'environnement Android soit prêt. Appuyez sur Actualiser si rien ne s'affiche après 10 secondes.
+              <p className="text-2xl text-[#D4AF37]/80 font-light">Initialisation de l'application</p>
+              <p className="text-sm max-w-xs text-center mt-4 text-[#D4AF37]/50">
+                Connexion à window.nova.fetch en cours...<br />
+                Appuyez sur <span className="font-mono text-[#D4AF37]">ACTUALISER</span> si l'écran reste bloqué.
               </p>
+              {!novaReady && (
+                <div className="mt-8 text-xs font-mono text-[#D4AF37]/30">En attente de l'environnement Android</div>
+              )}
             </div>
           )}
 
@@ -459,14 +518,13 @@ export default function PartantsPMU() {
               </div>
               <p className="text-xl text-[#D4AF37]/70 font-light">Sélectionnez une course</p>
               <p className="text-sm max-w-xs text-center mt-3 text-[#D4AF37]/40">
-                Choisissez une réunion puis une course pour afficher les partants, pronostics et combinaisons
+                Choisissez une réunion puis une course pour voir les partants et pronostics
               </p>
             </div>
           )}
 
           {selectedCourse && courseDetail && (
             <>
-              {/* Course header */}
               <div className="bg-gradient-to-br from-[#1E3A1E] to-[#132913] border border-[#D4AF37]/40 rounded-3xl p-8 mb-8 shadow-2xl">
                 <div className="flex justify-between items-start">
                   <div>
@@ -504,19 +562,15 @@ export default function PartantsPMU() {
                 </div>
               </div>
 
-              {/* Pronostic PMU Block */}
               <div className="mb-10">
                 <div className="flex items-center gap-3 mb-4 px-1">
-                  <div className="text-[#D4AF37]">
-                    <Award className="w-6 h-6" />
-                  </div>
+                  <Award className="w-6 h-6 text-[#D4AF37]" />
                   <h3 className="text-2xl font-semibold tracking-tight text-white">Pronostic PMU</h3>
                 </div>
 
                 <div className="bg-[#132913] border border-[#D4AF37]/30 rounded-3xl p-8">
                   <div className="mb-8">
                     <div className="uppercase text-xs font-bold tracking-widest text-[#D4AF37]/70 mb-4">SÉLECTION CLASSÉE</div>
-                    
                     <div className="space-y-3">
                       {pronosticChevaux.length > 0 ? (
                         pronosticChevaux.slice(0, 5).map((p, idx) => (
@@ -539,7 +593,7 @@ export default function PartantsPMU() {
                     </div>
                   </div>
 
-                  {courseDetail.commentaire && courseDetail.commentaire.texte && (
+                  {courseDetail.commentaire?.texte && (
                     <div className="mb-8 border-t border-[#D4AF37]/20 pt-8">
                       <div className="uppercase text-xs font-bold tracking-widest text-[#D4AF37]/70 mb-3">COMMENTAIRE DE L'EXPERT</div>
                       <div className="text-[#E8D5A3] leading-relaxed text-[15px] italic">
@@ -550,7 +604,6 @@ export default function PartantsPMU() {
 
                   <div>
                     <div className="uppercase text-xs font-bold tracking-widest text-[#D4AF37]/70 mb-5">COMBINAISONS RECOMMANDÉES</div>
-                    
                     <div className="grid grid-cols-2 gap-4">
                       {jeuxProposes.map((jeu, index) => (
                         <div key={index} className="bg-[#0F2A0F] border border-[#D4AF37]/20 rounded-2xl p-6">
@@ -566,7 +619,6 @@ export default function PartantsPMU() {
                 </div>
               </div>
 
-              {/* Liste des Partants */}
               <div>
                 <div className="flex items-center justify-between mb-5 px-1">
                   <h3 className="text-2xl font-semibold tracking-tight text-white flex items-center gap-3">
@@ -645,23 +697,9 @@ export default function PartantsPMU() {
               <p className="text-[#D4AF37]">Chargement des partants et pronostics...</p>
             </div>
           )}
-
-          {error && selectedCourse && (
-            <div className="bg-red-900/20 border border-red-500/40 rounded-3xl p-10 text-center">
-              <AlertTriangle className="mx-auto mb-4 text-red-400" />
-              <p className="text-red-200">{error}</p>
-              <button 
-                onClick={() => selectedReunion && selectedCourseNum && loadCourseDetails(selectedReunion, selectedCourseNum)} 
-                className="mt-6 px-8 py-3 bg-red-800 hover:bg-red-700 text-sm rounded-2xl"
-              >
-                RÉESSAYER
-              </button>
-            </div>
-          )}
         </div>
       </div>
 
-      {/* Footer with responsible gaming */}
       <footer className="bg-[#0A1F0A] border-t border-[#D4AF37]/20 py-10">
         <div className="max-w-5xl mx-auto px-6 text-center">
           <div className="flex justify-center mb-6">
@@ -676,7 +714,7 @@ export default function PartantsPMU() {
             <br />Cette application est à titre informatif. Les cotes sont indicatives et peuvent varier.
           </p>
           
-          <div className="mt-10 text-[10px] text-[#D4AF37]/30">Données fournies par l’API Turfinfo PMU • Mise à jour en temps réel</div>
+          <div className="mt-10 text-[10px] text-[#D4AF37]/30">Données fournies par l’API Turfinfo PMU • NOVA Studio</div>
         </div>
       </footer>
     </div>
