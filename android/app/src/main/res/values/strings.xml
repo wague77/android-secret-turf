@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">secret turf</string>
+    <string name="title_activity_main">secret turf</string>
+    <string name="package_name">com.novastudio.secretturf</string>
+    <string name="custom_url_scheme">com.novastudio.secretturf</string>
+</resources>
