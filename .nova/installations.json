@@ -1,4 +1,4 @@
 {
-  "requireApproval": false,
+  "requireApproval": true,
   "requests": []
 }
